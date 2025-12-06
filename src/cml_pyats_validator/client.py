@@ -5,6 +5,7 @@ Handles communication with Cisco Modeling Labs (CML) API.
 """
 
 import httpx
+import json
 from typing import Optional, Dict, Any, List
 import logging
 
@@ -71,7 +72,29 @@ class CMLClient:
             )
         
         response.raise_for_status()
-        return response.json() if response.text else None
+        
+        # Handle JSON response properly
+        if not response.text:
+            return None
+        
+        try:
+            result = response.json()
+            
+            # Handle double-encoded JSON (if response.json() returns a string)
+            if isinstance(result, str):
+                logger.debug(f"Response is string, attempting second JSON parse")
+                try:
+                    result = json.loads(result)
+                except Exception:
+                    # If it fails, return the string as-is
+                    pass
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to parse JSON response: {e}")
+            logger.error(f"Response text: {response.text[:500]}")
+            raise
     
     async def get_lab(self, lab_id: str) -> Dict[str, Any]:
         """Get lab details"""
@@ -83,14 +106,31 @@ class CMLClient:
     
     async def get_nodes(self, lab_id: str) -> List[Dict[str, Any]]:
         """Get all nodes in a lab"""
-        return await self._request('GET', f'/api/v0/labs/{lab_id}/nodes')
+        result = await self._request('GET', f'/api/v0/labs/{lab_id}/nodes')
+        
+        # Ensure we return a list
+        if not isinstance(result, list):
+            logger.error(f"Expected list from get_nodes, got {type(result)}")
+            return []
+        
+        return result
     
     async def find_node_by_label(self, lab_id: str, label: str) -> Optional[Dict[str, Any]]:
         """Find a node by its label/name"""
         nodes = await self.get_nodes(lab_id)
+        
+        if not isinstance(nodes, list):
+            logger.error(f"get_nodes returned non-list: {type(nodes)}")
+            return None
+        
         for node in nodes:
+            if not isinstance(node, dict):
+                logger.warning(f"Node is not a dict: {type(node)}")
+                continue
+                
             if node.get('label') == label:
                 return node
+        
         return None
     
     async def get_node_console_logs(self, lab_id: str, node_id: str, lines: int = 100) -> str:
