@@ -1,46 +1,45 @@
-"""Main FastMCP server for CML PyATS Validator."""
+"""
+CML PyATS Validator MCP Server
 
-import os
+FastMCP server that provides network device validation tools for CML labs.
+Uses SSH console access for command execution and PyATS parsers for output analysis.
+"""
+
+from mcp.server.fastmcp import FastMCP
+from typing import Optional, Dict, Any, List
 import logging
-from pathlib import Path
-from dotenv import load_dotenv
-from fastmcp import FastMCP
 
-# Load environment variables
-load_dotenv()
+# Import all tools
+from .tools import (
+    initialize_cml_client,
+    execute_device_command,
+    validate_routing_protocols,
+    validate_device_interfaces,
+    test_network_reachability,
+    get_configuration,
+    compare_configurations,
+    run_full_validation,
+)
 
-# Set up logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Create FastMCP server
-mcp = FastMCP("CML PyATS Validator")
-
-# Import tools
-from .tools import (
-    initialize_client,
-    execute_command,
-    validate_protocols,
-    validate_interfaces,
-    validate_reachability,
-    get_device_config,
-    compare_configs,
-    run_testbed_validation
-)
+# Initialize FastMCP server
+mcp = FastMCP("cml-pyats-validator")
 
 
 @mcp.tool()
-async def initialize_cml_client(
+async def initialize_cml_client_tool(
     cml_url: str,
     username: str,
     password: str,
     verify_ssl: bool = True
 ) -> dict:
-    """
-    Initialize connection to CML server.
+    """Initialize connection to CML server
     
     Must be called before using other validation tools. Authenticates with
     CML and stores credentials for subsequent operations.
@@ -50,80 +49,84 @@ async def initialize_cml_client(
         username: CML username
         password: CML password
         verify_ssl: Verify SSL certificates (set to False for self-signed certs)
-        
+    
     Returns:
         Authentication status and server information
     """
-    return await initialize_client(cml_url, username, password, verify_ssl)
+    return await initialize_cml_client(cml_url, username, password, verify_ssl)
 
 
 @mcp.tool()
-async def execute_device_command(
+async def execute_command(
     lab_id: str,
     device_name: str,
     command: str,
-    use_parser: bool = True
-) -> dict:
-    """
-    Execute command on a network device.
+    device_credentials: Optional[Dict[str, str]] = None,
+    use_parser: bool = True,
+    device_prompt: Optional[str] = None
+) -> Dict[str, Any]:
+    """Execute command on a network device
     
-    Sends a command to a device via console access and optionally parses
-    the output using PyATS/Genie parsers (Cisco devices only).
-    
-    For Cisco devices with available parsers, returns structured data.
-    For other devices or commands without parsers, returns raw text output.
+    Connects to device via SSH console, executes command, and optionally
+    parses output using PyATS/Genie parsers (Cisco devices only).
     
     Args:
         lab_id: CML lab ID
         device_name: Device label/name in the lab
         command: Command to execute
+        device_credentials: Optional device authentication:
+            {"username": "cisco", "password": "cisco", "enable_password": "cisco"}
         use_parser: Attempt to parse output with Genie (default: True)
-        
+        device_prompt: Expected device prompt pattern (default: auto-detect)
+    
     Returns:
         Command execution results with parsed or raw output
     """
-    return await execute_command(lab_id, device_name, command, use_parser)
-
-
-@mcp.tool()
-async def validate_routing_protocols(
-    lab_id: str,
-    device_name: str,
-    protocol: str,
-    validation_type: str = "neighbors",
-    expected_state: dict | None = None
-) -> dict:
-    """
-    Validate routing or L2 protocol operation.
-    
-    Checks protocol status using PyATS parsers to provide structured validation.
-    Supported protocols: OSPF, BGP, EIGRP, RIP, STP, VTP, HSRP, VRRP
-    
-    Args:
-        lab_id: CML lab ID
-        device_name: Device label/name
-        protocol: Protocol to validate (ospf, bgp, eigrp, stp, etc.)
-        validation_type: Type of check (neighbors, routes, state, etc.)
-        expected_state: Optional dict of expected values
-        
-    Returns:
-        Validation results with pass/fail status and details
-    """
-    return await validate_protocols(
-        lab_id, device_name, protocol, validation_type, expected_state
+    return await execute_device_command(
+        lab_id, device_name, command, device_credentials, use_parser, device_prompt
     )
 
 
 @mcp.tool()
-async def validate_device_interfaces(
+async def validate_protocols(
     lab_id: str,
     device_name: str,
-    interface: str | None = None,
-    check_errors: bool = True,
-    check_status: bool = True
-) -> dict:
+    protocol: str,
+    validation_type: str = "neighbors",
+    expected_state: Optional[Dict[str, Any]] = None,
+    device_credentials: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Validate routing or L2 protocol operation
+    
+    Checks protocol status using PyATS parsers to provide structured validation.
+    Supported protocols: OSPF, BGP, EIGRP
+    
+    Args:
+        lab_id: CML lab ID
+        device_name: Device label/name
+        protocol: Protocol to validate (ospf, bgp, eigrp)
+        validation_type: Type of check (neighbors, routes, database)
+        expected_state: Optional dict of expected values
+        device_credentials: Device authentication credentials
+    
+    Returns:
+        Validation results with pass/fail status and details
     """
-    Validate interface status and health.
+    return await validate_routing_protocols(
+        lab_id, device_name, protocol, validation_type, expected_state, device_credentials
+    )
+
+
+@mcp.tool()
+async def validate_interfaces(
+    lab_id: str,
+    device_name: str,
+    interface: Optional[str] = None,
+    check_errors: bool = True,
+    check_status: bool = True,
+    device_credentials: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Validate interface status and health
     
     Checks interface operational status, errors, CRC errors, and other
     health metrics. Can check a specific interface or all interfaces.
@@ -134,26 +137,27 @@ async def validate_device_interfaces(
         interface: Specific interface (None = all interfaces)
         check_errors: Check for interface errors
         check_status: Check operational status
-        
+        device_credentials: Device authentication credentials
+    
     Returns:
         Interface validation results with any issues found
     """
-    return await validate_interfaces(
-        lab_id, device_name, interface, check_errors, check_status
+    return await validate_device_interfaces(
+        lab_id, device_name, interface, check_errors, check_status, device_credentials
     )
 
 
 @mcp.tool()
-async def test_network_reachability(
+async def test_reachability(
     lab_id: str,
     source_device: str,
     destination: str,
     test_type: str = "ping",
     count: int = 5,
-    expected_success: bool = True
-) -> dict:
-    """
-    Test network reachability using ping or traceroute.
+    expected_success: bool = True,
+    device_credentials: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Test network reachability using ping or traceroute
     
     Executes connectivity tests and validates against expected results.
     Useful for verifying routing and end-to-end connectivity.
@@ -165,23 +169,24 @@ async def test_network_reachability(
         test_type: "ping" or "traceroute"
         count: Number of packets (ping only)
         expected_success: Whether connection should work
-        
+        device_credentials: Device authentication credentials
+    
     Returns:
         Reachability test results with success/failure status
     """
-    return await validate_reachability(
-        lab_id, source_device, destination, test_type, count, expected_success
+    return await test_network_reachability(
+        lab_id, source_device, destination, test_type, count, expected_success, device_credentials
     )
 
 
 @mcp.tool()
-async def get_configuration(
+async def get_device_configuration(
     lab_id: str,
     device_name: str,
-    config_type: str = "running"
-) -> dict:
-    """
-    Retrieve device configuration.
+    config_type: str = "running",
+    device_credentials: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Retrieve device configuration
     
     Gets the running or startup configuration from a device.
     Useful for backup, review, or comparison purposes.
@@ -190,22 +195,22 @@ async def get_configuration(
         lab_id: CML lab ID
         device_name: Device label/name
         config_type: "running" or "startup"
-        
+        device_credentials: Device authentication credentials
+    
     Returns:
         Device configuration as text
     """
-    return await get_device_config(lab_id, device_name, config_type)
+    return await get_configuration(lab_id, device_name, config_type, device_credentials)
 
 
 @mcp.tool()
-async def compare_configurations(
+async def compare_device_configurations(
     config1: str,
     config2: str,
     ignore_whitespace: bool = True,
     context_lines: int = 3
-) -> dict:
-    """
-    Compare two device configurations.
+) -> Dict[str, Any]:
+    """Compare two device configurations
     
     Generates a unified diff showing additions, deletions, and changes
     between two configuration texts. Useful for change validation.
@@ -215,60 +220,42 @@ async def compare_configurations(
         config2: Second configuration
         ignore_whitespace: Ignore whitespace differences
         context_lines: Lines of context around changes
-        
+    
     Returns:
         Comparison results with unified diff
     """
-    return await compare_configs(
-        config1, config2, ignore_whitespace, context_lines
-    )
+    return await compare_configurations(config1, config2, ignore_whitespace, context_lines)
 
 
 @mcp.tool()
-async def run_full_validation(
+async def run_testbed_validation(
     lab_id: str,
-    validation_checks: list[str] | None = None,
-    device_list: list[str] | None = None
-) -> dict:
-    """
-    Run comprehensive testbed validation.
+    validation_checks: Optional[List[str]] = None,
+    device_list: Optional[List[str]] = None,
+    device_credentials: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """Run comprehensive testbed validation
     
     Performs a complete health check across all devices in the lab,
-    including interface status, protocol validation, error checking,
-    and connectivity tests.
+    including interface status, protocol validation, and error checking.
     
-    Default checks if none specified:
-    - interfaces: Verify interfaces are up
-    - protocols: Check routing protocol neighbors
-    - connectivity: Test reachability
-    - errors: Check for interface errors
+    Default checks: interfaces, protocols, errors
     
     Args:
         lab_id: CML lab ID
         validation_checks: List of checks to run (None = all)
         device_list: Specific devices to test (None = all)
-        
+        device_credentials: Device authentication credentials
+    
     Returns:
         Comprehensive validation results with overall pass/fail status
     """
-    return await run_testbed_validation(lab_id, validation_checks, device_list)
+    return await run_full_validation(lab_id, validation_checks, device_list, device_credentials)
 
 
 def main():
-    """Entry point for running the MCP server."""
-    logger.info("Starting CML PyATS Validator MCP Server")
-    
-    # Check for required environment variables
-    required_vars = ["CML_URL", "CML_USERNAME", "CML_PASSWORD"]
-    missing = [var for var in required_vars if not os.getenv(var)]
-    
-    if missing:
-        logger.warning(
-            f"Missing environment variables: {', '.join(missing)}. "
-            "Client will need to call initialize_client with credentials."
-        )
-    
-    # Run the server
+    """Main entry point for the MCP server"""
+    logger.info("Starting CML PyATS Validator MCP server")
     mcp.run()
 
 
