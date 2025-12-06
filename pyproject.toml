@@ -1,8 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "cml-pyats-validator"
 version = "0.1.0"
-description = "Lean MCP server for CML device validation using PyATS parsers and tmux console access"
-requires-python = ">=3.12"
+description = "MCP server for CML device validation using PyATS parsers"
+readme = "README.md"
+requires-python = ">=3.10"
 dependencies = [
     "fastmcp>=2.0.0",
     "httpx>=0.27.0",
@@ -10,14 +15,27 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyats>=24.0",
     "genie>=24.0",
+    "pexpect>=4.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "black>=24.0.0",
+    "ruff>=0.3.0",
 ]
 
 [project.scripts]
 cml-pyats-validator = "cml_pyats_validator.server:main"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[tool.uv]
+dev-dependencies = []
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/cml_pyats_validator"]
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
