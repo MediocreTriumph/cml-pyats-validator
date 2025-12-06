@@ -1,165 +1,149 @@
-"""Command execution tool using tmux console access and PyATS parsers."""
+"""
+Command Execution Tool
 
+Executes commands on devices via SSH console access and optionally parses with PyATS.
+"""
+
+from typing import Optional, Dict, Any
+from .auth import get_cml_client
+from ..console_executor import execute_via_console
+from ..pyats_helper import get_genie_os, is_cisco_device, parse_output
 import logging
-from typing import Optional, Any
-from .auth import require_client
-from ..pyats_helper import PyATSHelper
-from ..utils import sanitize_session_name
 
 logger = logging.getLogger(__name__)
 
-# Note: This assumes tmux-mcp tools are available in the MCP environment
-# The actual tmux tool calls would be made through the MCP framework
 
-
-async def execute_command(
+async def execute_device_command(
     lab_id: str,
     device_name: str,
     command: str,
-    use_parser: bool = True
-) -> dict[str, Any]:
-    """
-    Execute command on a device via console and optionally parse output.
+    device_credentials: Optional[Dict[str, str]] = None,
+    use_parser: bool = True,
+    device_prompt: Optional[str] = None
+) -> Dict[str, Any]:
+    """Execute command on a network device via console access
     
-    This tool uses tmux to establish console sessions with devices and
-    applies PyATS/Genie parsers when available (Cisco devices only).
+    Connects to device via SSH to CML console server, executes command,
+    and optionally parses output using PyATS/Genie parsers.
     
     Args:
         lab_id: CML lab ID
         device_name: Device label/name in the lab
-        command: Command to execute
-        use_parser: If True, attempt to parse output with Genie (Cisco only)
-        
+        command: Command to execute (e.g., 'show ip interface brief')
+        device_credentials: Optional device authentication:
+            {
+                "username": "cisco",
+                "password": "cisco",
+                "enable_password": "cisco"  # For Cisco devices
+            }
+        use_parser: Attempt to parse output with PyATS (default: True)
+        device_prompt: Expected device prompt pattern (default: auto-detect)
+    
     Returns:
         Dictionary containing:
-        - success (bool): Whether command executed successfully
-        - command (str): The command that was executed
-        - output (str): Raw command output
-        - parsed (bool): Whether output was parsed
-        - data (dict|str): Parsed data if available, raw output otherwise
-        - parser_used (str|None): Name of parser used, if any
-        - device (str): Device name
-        - device_os (str|None): Detected device OS type
-    """
-    client = require_client()
+            - device: Device name
+            - command: Command executed
+            - raw_output: Raw command output
+            - parsed_output: Parsed data (if use_parser=True and available)
+            - parser_used: Whether parser was used
+            - parser_error: Error message if parsing failed
     
+    Example:
+        result = await execute_device_command(
+            lab_id="abc123",
+            device_name="R1",
+            command="show ip interface brief",
+            device_credentials={"username": "cisco", "password": "cisco"},
+            use_parser=True
+        )
+    """
     try:
-        # Get lab and node information
-        lab = await client.get_lab(lab_id)
-        node = await client.get_node_by_label(lab_id, device_name)
+        client = get_cml_client()
         
+        # Get node information from CML API
+        node = await client.find_node_by_label(lab_id, device_name)
         if not node:
             return {
-                "success": False,
-                "error": f"Device '{device_name}' not found in lab",
-                "device": device_name
+                "status": "error",
+                "error": f"Device '{device_name}' not found in lab '{lab_id}'"
             }
         
-        node_definition = node.get("data", {}).get("node_definition", "")
-        node_id = node.get("id")
+        node_uuid = node['id']
+        device_type = node.get('node_definition', 'unknown')
         
-        # Determine device OS type
-        device_os = PyATSHelper.get_device_os(node_definition)
-        is_cisco = PyATSHelper.is_cisco_device(node_definition)
+        logger.info(f"Executing '{command}' on {device_name} ({device_type})")
         
-        # TODO: Execute command via tmux console
-        # This is a placeholder - actual implementation would use tmux MCP tools:
-        # 1. Create/attach to tmux session for this device
-        # 2. Send command via tmux send-keys
-        # 3. Capture output via tmux capture-pane
+        # Extract CML hostname from URL
+        cml_host = client.url.replace("https://", "").replace("http://", "").split(":")[0]
         
-        # For now, return a structure showing what would happen
+        # Auto-detect prompt pattern if not provided
+        if not device_prompt:
+            cisco_types = ['iosv', 'csr1000v', 'iosvl2', 'nxosv', 'iosxrv', 'asav']
+            if any(dt in device_type for dt in cisco_types):
+                device_prompt = r"[#>]"
+            else:
+                device_prompt = r"[#>$]"
+        
+        # Extract device credentials
+        device_user = None
+        device_pass = None
+        device_enable_pass = None
+        if device_credentials:
+            device_user = device_credentials.get("username")
+            device_pass = device_credentials.get("password")
+            device_enable_pass = device_credentials.get("enable_password")
+        
+        # Execute command via SSH console
+        raw_output = await execute_via_console(
+            cml_host=cml_host,
+            cml_user=client.username,
+            cml_pass=client.password,
+            node_uuid=node_uuid,
+            command=command,
+            device_user=device_user,
+            device_pass=device_pass,
+            device_enable_pass=device_enable_pass,
+            device_prompt=device_prompt,
+            timeout=30
+        )
+        
         result = {
-            "success": True,
-            "command": command,
             "device": device_name,
-            "device_os": device_os,
-            "node_definition": node_definition,
-            "lab_id": lab_id,
-            "node_id": node_id,
-            "note": "Command execution requires tmux MCP integration"
+            "command": command,
+            "raw_output": raw_output,
+            "node_uuid": node_uuid,
+            "device_type": device_type
         }
         
-        # Placeholder for actual output
-        raw_output = ""
-        
-        # If we have output and should parse it
-        if raw_output and use_parser and is_cisco:
-            normalized_cmd = PyATSHelper.normalize_command(command)
-            parse_result = PyATSHelper.parse_output(
-                normalized_cmd,
-                raw_output,
-                device_os,
-                device_name
-            )
-            
-            result.update({
-                "output": raw_output,
-                "parsed": parse_result["parsed"],
-                "data": parse_result["data"],
-                "parser_used": parse_result.get("parser_used"),
-                "parser_note": parse_result.get("note")
-            })
+        # Parse output if requested
+        if use_parser and is_cisco_device(device_type):
+            try:
+                genie_os = get_genie_os(device_type)
+                parsed = parse_output(command, raw_output, genie_os)
+                
+                result["parsed_output"] = parsed
+                result["parser_used"] = True
+                
+                logger.info(f"Successfully parsed output for '{command}'")
+                
+            except Exception as e:
+                result["parser_error"] = str(e)
+                result["parser_used"] = False
+                logger.warning(f"Parsing failed for '{command}': {e}")
         else:
-            result.update({
-                "output": raw_output,
-                "parsed": False,
-                "data": raw_output,
-                "parser_used": None
-            })
-            
-            if not is_cisco:
-                result["note"] = f"Device type '{node_definition}' is not Cisco - returning raw output"
+            result["parser_used"] = False
+            if use_parser and not is_cisco_device(device_type):
+                result["parser_error"] = (
+                    f"No PyATS parser available for device type: {device_type}"
+                )
         
         return result
         
     except Exception as e:
-        logger.error(f"Error executing command on {device_name}: {e}", exc_info=True)
+        logger.error(f"Command execution failed: {e}")
         return {
-            "success": False,
-            "error": str(e),
+            "status": "error",
             "device": device_name,
-            "command": command
+            "command": command,
+            "error": str(e)
         }
-
-
-async def _execute_via_tmux(
-    lab_id: str,
-    device_name: str,
-    command: str
-) -> str:
-    """
-    Execute command via tmux console session.
-    
-    This is a helper function that would integrate with tmux MCP tools.
-    
-    Implementation steps:
-    1. Create session name from lab_id + device_name
-    2. Check if tmux session exists, create if needed
-    3. Get console connection details from CML API
-    4. Establish console connection in tmux session
-    5. Send command
-    6. Capture output
-    7. Return output text
-    
-    Args:
-        lab_id: CML lab ID
-        device_name: Device name
-        command: Command to execute
-        
-    Returns:
-        Raw command output as string
-    """
-    # This would use the tmux MCP tools available in the environment
-    # Example flow:
-    # - tmux:tmux_create_session(session_name)
-    # - tmux:tmux_send_keys(session_name, command)
-    # - output = tmux:tmux_capture_pane(session_name)
-    
-    session_name = sanitize_session_name(f"cml_{lab_id}_{device_name}")
-    
-    # Placeholder for actual tmux integration
-    raise NotImplementedError(
-        "Tmux console integration is not yet implemented. "
-        "This requires tmux MCP tools to be available."
-    )
