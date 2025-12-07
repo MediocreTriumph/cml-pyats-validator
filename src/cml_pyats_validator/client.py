@@ -100,20 +100,25 @@ class CMLClient:
         """Get lab details"""
         return await self._request('GET', f'/api/v0/labs/{lab_id}')
     
+    async def get_topology(self, lab_id: str) -> Dict[str, Any]:
+        """Get complete lab topology including nodes, links, and lab details"""
+        return await self._request('GET', f'/api/v0/labs/{lab_id}/topology')
+    
     async def get_node(self, lab_id: str, node_id: str) -> Dict[str, Any]:
         """Get node details"""
         return await self._request('GET', f'/api/v0/labs/{lab_id}/nodes/{node_id}')
     
     async def get_nodes(self, lab_id: str) -> List[Dict[str, Any]]:
-        """Get all nodes in a lab"""
-        result = await self._request('GET', f'/api/v0/labs/{lab_id}/nodes')
+        """Get all nodes in a lab (with full node details)"""
+        # Use topology endpoint to get complete node data
+        topology = await self.get_topology(lab_id)
+        nodes = topology.get('nodes', [])
         
-        # Ensure we return a list
-        if not isinstance(result, list):
-            logger.error(f"Expected list from get_nodes, got {type(result)}")
+        if not isinstance(nodes, list):
+            logger.error(f"Expected list from topology nodes, got {type(nodes)}")
             return []
         
-        return result
+        return nodes
     
     async def find_node_by_label(self, lab_id: str, label: str) -> Optional[Dict[str, Any]]:
         """Find a node by its label/name"""
