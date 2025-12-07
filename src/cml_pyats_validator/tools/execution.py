@@ -68,9 +68,31 @@ async def execute_device_command(
                 "error": f"Device '{device_name}' not found in lab '{lab_id}'"
             }
         
-        node_uuid = node['id']
+        node_id = node['id']
         device_type = node.get('node_definition', 'unknown')
         
+        logger.info(f"Found device {device_name} with node ID {node_id}")
+        
+        # Get detailed node information to retrieve console key
+        node_details = await client.get_node(lab_id, node_id)
+        
+        # Extract console key from serial_consoles
+        serial_consoles = node_details.get('serial_consoles', [])
+        if not serial_consoles:
+            return {
+                "status": "error",
+                "error": f"No serial consoles found for device '{device_name}'"
+            }
+        
+        # Use the first console (device_number 0)
+        console_key = serial_consoles[0].get('console_key')
+        if not console_key:
+            return {
+                "status": "error",
+                "error": f"No console key found for device '{device_name}'"
+            }
+        
+        logger.info(f"Using console key {console_key} for {device_name}")
         logger.info(f"Executing '{command}' on {device_name} ({device_type})")
         
         # Extract CML hostname from URL
@@ -93,12 +115,12 @@ async def execute_device_command(
             device_pass = device_credentials.get("password")
             device_enable_pass = device_credentials.get("enable_password")
         
-        # Execute command via SSH console
+        # Execute command via SSH console using console_key instead of node_uuid
         raw_output = await execute_via_console(
             cml_host=cml_host,
             cml_user=client.username,
             cml_pass=client.password,
-            node_uuid=node_uuid,
+            node_uuid=console_key,  # This is actually the console_key, not node UUID
             command=command,
             device_user=device_user,
             device_pass=device_pass,
@@ -111,7 +133,8 @@ async def execute_device_command(
             "device": device_name,
             "command": command,
             "raw_output": raw_output,
-            "node_uuid": node_uuid,
+            "node_id": node_id,
+            "console_key": console_key,
             "device_type": device_type
         }
         
@@ -141,6 +164,8 @@ async def execute_device_command(
         
     except Exception as e:
         logger.error(f"Command execution failed: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "status": "error",
             "device": device_name,
