@@ -92,9 +92,13 @@ async def execute_via_console(
             time.sleep(0.5)
             child.sendline("")
             
-            # Use a more flexible pattern that captures the full prompt
-            # This pattern matches: optional whitespace, word characters/dashes, then > or #
-            flexible_prompt = r"\s*[\w\-]+[>#]\s*$"
+            # Cisco prompt pattern that handles all modes:
+            # - hostname>            (user mode)
+            # - hostname#            (privileged mode)
+            # - hostname(config)#    (config mode)
+            # - hostname(config-if)# (interface config)
+            # - hostname(config-router)# (router config)
+            flexible_prompt = r"\s*[\w\-]+(\([^\)]+\))?[>#]\s*$"
             
             # Try to detect what state we're in
             i = child.expect([
