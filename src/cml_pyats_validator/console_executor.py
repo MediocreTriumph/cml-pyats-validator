@@ -79,30 +79,34 @@ async def execute_via_console(
             # Wait for connection confirmation
             child.expect(r"Connected to CML terminalserver", timeout=5)
             
-            logger.info("Connected to device console, waiting for prompt")
+            # CRITICAL: Wait for the "Escape character" message to appear
+            # This is the message that tells us the connection is fully established
+            child.expect(r"Escape character is", timeout=5)
             
-            # Wait longer for device to be ready (banners, boot messages, etc.)
-            time.sleep(3)
+            logger.info("Console connection established, waiting for prompt")
             
-            # Send multiple newlines to trigger prompt
+            # Small delay to let any remaining banner text display
+            time.sleep(1)
+            
+            # NOW send newlines to trigger the prompt
             child.sendline("")
             time.sleep(0.5)
             child.sendline("")
             
-            # Try to detect what state we're in with a longer timeout
+            # Try to detect what state we're in
             i = child.expect([
                 r"[Uu]sername:",
                 r"[Ll]ogin:",
-                r"[\w\-]+[>#]",  # More flexible prompt pattern
+                r"[\w\-]+[>#]",  # Flexible prompt pattern
                 pexpect.TIMEOUT
-            ], timeout=15)
+            ], timeout=10)
             
-            if i == 3:  # Timeout - device might still be booting
-                logger.warning("Timeout waiting for initial prompt, sending more newlines")
+            if i == 3:  # Timeout
+                logger.warning("Timeout waiting for initial prompt, trying again")
                 child.sendline("")
                 time.sleep(1)
                 child.sendline("")
-                # Try one more time with original prompt pattern
+                # Try one more time
                 child.expect(device_prompt, timeout=10)
             elif i in [0, 1]:  # Username/Login prompt
                 if not device_user:
@@ -140,7 +144,7 @@ async def execute_via_console(
                     # Wait for privileged prompt
                     child.expect(r"#", timeout=5)
             
-            # Clear any buffered output
+            # Clear any buffered output by sending newline and waiting for prompt
             child.sendline("")
             child.expect(device_prompt, timeout=5)
             
@@ -183,9 +187,9 @@ async def execute_via_console(
             return output.strip()
             
         except pexpect.TIMEOUT as e:
-            # Log what we got before timeout
-            logger.error(f"Timeout. Buffer content: {child.buffer if hasattr(child, 'buffer') else 'N/A'}")
-            logger.error(f"Before content: {child.before if hasattr(child, 'before') else 'N/A'}")
+            # Log what we got before timeout for debugging
+            logger.error(f"Timeout. Buffer: {child.buffer if hasattr(child, 'buffer') else 'N/A'}")
+            logger.error(f"Before: {child.before if hasattr(child, 'before') else 'N/A'}")
             child.close(force=True)
             raise TimeoutError(f"Command timed out after {timeout}s: {str(e)}")
         except pexpect.EOF as e:
