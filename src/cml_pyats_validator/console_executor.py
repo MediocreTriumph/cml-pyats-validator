@@ -32,7 +32,7 @@ async def execute_via_console(
         cml_host: CML server hostname/IP
         cml_user: CML SSH username
         cml_pass: CML SSH password
-        node_uuid: Node UUID to connect to
+        node_uuid: Node UUID (or console_key) to connect to
         command: Command to execute on device
         device_user: Device username (if authentication required)
         device_pass: Device password (if authentication required)
@@ -73,27 +73,38 @@ async def execute_via_console(
             
             logger.info(f"Connected to CML console server, connecting to node {node_uuid}")
             
-            # Connect to node console via UUID
+            # Connect to node console via UUID/console_key
             child.sendline(f"connect {node_uuid}")
             
             # Wait for connection confirmation
             child.expect(r"Connected to CML terminalserver", timeout=5)
             
-            # Wait for device to be ready
-            time.sleep(2)
+            logger.info("Connected to device console, waiting for prompt")
             
-            # Send newline to trigger prompt
+            # Wait longer for device to be ready (banners, boot messages, etc.)
+            time.sleep(3)
+            
+            # Send multiple newlines to trigger prompt
+            child.sendline("")
+            time.sleep(0.5)
             child.sendline("")
             
-            # Check if we need to authenticate to the device
+            # Try to detect what state we're in with a longer timeout
             i = child.expect([
                 r"[Uu]sername:",
                 r"[Ll]ogin:",
-                device_prompt,
+                r"[\w\-]+[>#]",  # More flexible prompt pattern
                 pexpect.TIMEOUT
-            ], timeout=10)
+            ], timeout=15)
             
-            if i in [0, 1]:  # Username/Login prompt
+            if i == 3:  # Timeout - device might still be booting
+                logger.warning("Timeout waiting for initial prompt, sending more newlines")
+                child.sendline("")
+                time.sleep(1)
+                child.sendline("")
+                # Try one more time with original prompt pattern
+                child.expect(device_prompt, timeout=10)
+            elif i in [0, 1]:  # Username/Login prompt
                 if not device_user:
                     raise ValueError(
                         "Device requires authentication but no credentials provided"
@@ -110,12 +121,15 @@ async def execute_via_console(
                 
                 # Wait for prompt after login
                 child.expect(device_prompt, timeout=10)
+            # If i == 2, we got a prompt, continue
+            
+            logger.info("Device prompt detected")
             
             # If Cisco device and we have enable password, enter enable mode
             if device_enable_pass:
                 # Check current prompt to see if we're in user mode
                 child.sendline("")
-                i = child.expect([r">", r"#", device_prompt], timeout=5)
+                i = child.expect([r">", r"#"], timeout=5)
                 
                 if i == 0:  # User mode (>)
                     logger.info("Entering enable mode")
@@ -169,8 +183,10 @@ async def execute_via_console(
             return output.strip()
             
         except pexpect.TIMEOUT as e:
+            # Log what we got before timeout
+            logger.error(f"Timeout. Buffer content: {child.buffer if hasattr(child, 'buffer') else 'N/A'}")
+            logger.error(f"Before content: {child.before if hasattr(child, 'before') else 'N/A'}")
             child.close(force=True)
-            logger.error(f"Command timed out after {timeout}s")
             raise TimeoutError(f"Command timed out after {timeout}s: {str(e)}")
         except pexpect.EOF as e:
             logger.error("SSH connection closed unexpectedly")
