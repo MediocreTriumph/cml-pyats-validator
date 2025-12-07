@@ -80,24 +80,27 @@ async def execute_via_console(
             child.expect(r"Connected to CML terminalserver", timeout=5)
             
             # CRITICAL: Wait for the "Escape character" message to appear
-            # This is the message that tells us the connection is fully established
             child.expect(r"Escape character is", timeout=5)
             
-            logger.info("Console connection established, waiting for prompt")
+            logger.info("Console connection established, waiting for device prompt")
             
             # Small delay to let any remaining banner text display
             time.sleep(1)
             
-            # NOW send newlines to trigger the prompt
+            # Send newlines to trigger the prompt
             child.sendline("")
             time.sleep(0.5)
             child.sendline("")
+            
+            # Use a more flexible pattern that captures the full prompt
+            # This pattern matches: optional whitespace, word characters/dashes, then > or #
+            flexible_prompt = r"\s*[\w\-]+[>#]\s*$"
             
             # Try to detect what state we're in
             i = child.expect([
                 r"[Uu]sername:",
                 r"[Ll]ogin:",
-                r"[\w\-]+[>#]",  # Flexible prompt pattern
+                flexible_prompt,
                 pexpect.TIMEOUT
             ], timeout=10)
             
@@ -105,8 +108,7 @@ async def execute_via_console(
                 logger.warning("Timeout waiting for initial prompt, trying again")
                 child.sendline("")
                 time.sleep(1)
-                child.sendline("")
-                # Try one more time
+                # Try one more time with the provided device_prompt pattern
                 child.expect(device_prompt, timeout=10)
             elif i in [0, 1]:  # Username/Login prompt
                 if not device_user:
@@ -115,19 +117,13 @@ async def execute_via_console(
                     )
                 
                 logger.info("Device requires authentication, logging in")
-                
-                # Send username
                 child.sendline(device_user)
-                
-                # Wait for password prompt
                 child.expect(r"[Pp]assword:", timeout=5)
                 child.sendline(device_pass)
-                
-                # Wait for prompt after login
-                child.expect(device_prompt, timeout=10)
+                child.expect(flexible_prompt, timeout=10)
             # If i == 2, we got a prompt, continue
             
-            logger.info("Device prompt detected")
+            logger.info(f"Device prompt detected: {child.after}")
             
             # If Cisco device and we have enable password, enter enable mode
             if device_enable_pass:
@@ -140,31 +136,30 @@ async def execute_via_console(
                     child.sendline("enable")
                     child.expect(r"[Pp]assword:", timeout=5)
                     child.sendline(device_enable_pass)
-                    
-                    # Wait for privileged prompt
                     child.expect(r"#", timeout=5)
             
-            # Clear any buffered output by sending newline and waiting for prompt
+            # Clear buffer - send newline and wait for prompt
             child.sendline("")
-            child.expect(device_prompt, timeout=5)
+            child.expect(flexible_prompt, timeout=5)
             
-            logger.info(f"Executing command: {command}")
+            logger.info(f"Ready to execute command: {command}")
             
-            # Send actual command
+            # Send the actual command
             child.sendline(command)
             
-            # Wait for command to complete (prompt returns)
-            child.expect(device_prompt, timeout=timeout)
+            # Wait for command output to complete (prompt returns)
+            child.expect(flexible_prompt, timeout=timeout)
             
             # Extract output (everything between command and next prompt)
             output = child.before
             
-            logger.info("Command executed successfully, disconnecting")
+            logger.info(f"Command output length: {len(output)} chars")
+            logger.info(f"Command output preview: {output[:200]}")
             
             # Exit node console with Ctrl+]
             child.sendcontrol(']')
             
-            # Wait for disconnection message and CML console prompt
+            # Wait for CML console prompt
             child.expect(r"consoles>", timeout=5)
             
             # Exit SSH
@@ -187,9 +182,11 @@ async def execute_via_console(
             return output.strip()
             
         except pexpect.TIMEOUT as e:
-            # Log what we got before timeout for debugging
-            logger.error(f"Timeout. Buffer: {child.buffer if hasattr(child, 'buffer') else 'N/A'}")
+            # Enhanced debugging
+            logger.error(f"Timeout waiting for pattern")
+            logger.error(f"Buffer: {child.buffer if hasattr(child, 'buffer') else 'N/A'}")
             logger.error(f"Before: {child.before if hasattr(child, 'before') else 'N/A'}")
+            logger.error(f"After: {child.after if hasattr(child, 'after') else 'N/A'}")
             child.close(force=True)
             raise TimeoutError(f"Command timed out after {timeout}s: {str(e)}")
         except pexpect.EOF as e:
