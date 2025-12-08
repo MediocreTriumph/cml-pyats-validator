@@ -79,18 +79,17 @@ async def execute_via_console(
             # Wait for connection confirmation
             child.expect(r"Connected to CML terminalserver", timeout=5)
             
-            # CRITICAL: Wait for the "Escape character" message to appear
-            child.expect(r"Escape character is", timeout=5)
+            logger.info("Console connection established, waiting for device to be ready")
             
-            logger.info("Console connection established, waiting for device prompt")
-            
-            # Small delay to let any remaining banner text display
-            time.sleep(1)
+            # Wait for escape character message and any banners to complete
+            # Instead of expecting the escape message, just wait longer
+            time.sleep(3)
             
             # Send newlines to trigger the prompt
             child.sendline("")
             time.sleep(0.5)
             child.sendline("")
+            time.sleep(0.5)
             
             # Cisco prompt pattern that handles all modes:
             # - hostname>            (user mode)
@@ -112,8 +111,9 @@ async def execute_via_console(
                 logger.warning("Timeout waiting for initial prompt, trying again")
                 child.sendline("")
                 time.sleep(1)
-                # Try one more time with the provided device_prompt pattern
-                child.expect(device_prompt, timeout=10)
+                child.sendline("")
+                # Try one more time
+                child.expect(flexible_prompt, timeout=10)
             elif i in [0, 1]:  # Username/Login prompt
                 if not device_user:
                     raise ValueError(
@@ -158,7 +158,6 @@ async def execute_via_console(
             output = child.before
             
             logger.info(f"Command output length: {len(output)} chars")
-            logger.info(f"Command output preview: {output[:200]}")
             
             # Exit node console with Ctrl+]
             child.sendcontrol(']')
