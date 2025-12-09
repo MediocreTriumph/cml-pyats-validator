@@ -76,44 +76,43 @@ async def execute_via_console(
             # Connect to node console via UUID/console_key
             child.sendline(f"connect {node_uuid}")
             
-            # Wait for connection confirmation
-            child.expect(r"Connected to CML terminalserver", timeout=5)
+            # Wait for connection confirmation - look for either message
+            i = child.expect([
+                r"Connected to CML terminalserver",
+                r"Connecting to console",
+                pexpect.TIMEOUT
+            ], timeout=5)
             
-            logger.info("Console connection established, waiting for device to be ready")
-            
-            # Wait for escape character message and any banners to complete
-            # Instead of expecting the escape message, just wait longer
-            time.sleep(3)
-            
-            # Send newlines to trigger the prompt
-            child.sendline("")
-            time.sleep(0.5)
-            child.sendline("")
-            time.sleep(0.5)
+            logger.info("Console connection initiated, waiting for device")
             
             # Cisco prompt pattern that handles all modes:
-            # - hostname>            (user mode)
-            # - hostname#            (privileged mode)
-            # - hostname(config)#    (config mode)
-            # - hostname(config-if)# (interface config)
-            # - hostname(config-router)# (router config)
-            flexible_prompt = r"\s*[\w\-]+(\([^\)]+\))?[>#]\s*$"
+            flexible_prompt = r"[\w\-]+(\([^\)]+\))?[>#]"
             
-            # Try to detect what state we're in
+            # Wait for the device to display something - could be banner, escape message, or prompt
+            # Give it plenty of time for banners to complete
+            time.sleep(4)
+            
+            # Now aggressively try to get a prompt
+            for attempt in range(3):
+                child.sendline("")
+                time.sleep(1)
+                
+                # Check if we have anything in the buffer that looks like a prompt
+                if re.search(flexible_prompt, child.buffer if hasattr(child, 'buffer') else ''):
+                    logger.info(f"Found prompt in buffer on attempt {attempt + 1}")
+                    break
+            
+            # Now expect the prompt
             i = child.expect([
                 r"[Uu]sername:",
                 r"[Ll]ogin:",
                 flexible_prompt,
                 pexpect.TIMEOUT
-            ], timeout=10)
+            ], timeout=5)
             
             if i == 3:  # Timeout
-                logger.warning("Timeout waiting for initial prompt, trying again")
-                child.sendline("")
-                time.sleep(1)
-                child.sendline("")
-                # Try one more time
-                child.expect(flexible_prompt, timeout=10)
+                logger.error(f"Failed to get prompt. Buffer: {child.buffer if hasattr(child, 'buffer') else 'N/A'}")
+                raise TimeoutError("Could not get device prompt after connection")
             elif i in [0, 1]:  # Username/Login prompt
                 if not device_user:
                     raise ValueError(
@@ -131,7 +130,6 @@ async def execute_via_console(
             
             # If Cisco device and we have enable password, enter enable mode
             if device_enable_pass:
-                # Check current prompt to see if we're in user mode
                 child.sendline("")
                 i = child.expect([r">", r"#"], timeout=5)
                 
@@ -142,7 +140,7 @@ async def execute_via_console(
                     child.sendline(device_enable_pass)
                     child.expect(r"#", timeout=5)
             
-            # Clear buffer - send newline and wait for prompt
+            # Clear buffer
             child.sendline("")
             child.expect(flexible_prompt, timeout=5)
             
@@ -185,7 +183,6 @@ async def execute_via_console(
             return output.strip()
             
         except pexpect.TIMEOUT as e:
-            # Enhanced debugging
             logger.error(f"Timeout waiting for pattern")
             logger.error(f"Buffer: {child.buffer if hasattr(child, 'buffer') else 'N/A'}")
             logger.error(f"Before: {child.before if hasattr(child, 'before') else 'N/A'}")
