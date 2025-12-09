@@ -71,7 +71,11 @@ ROUTER_CONFIGS = {
 
 
 def get_console_keys():
-    """Get console keys for all nodes from CML API"""
+    """Get console keys for all nodes from CML API
+    
+    Console keys require a SEPARATE API call per node:
+    GET /api/v0/labs/{lab_id}/nodes/{node_id}/keys/console?line=0
+    """
     import urllib3
     urllib3.disable_warnings()
     
@@ -91,7 +95,7 @@ def get_console_keys():
         token = resp.text.strip('"')
         headers = {"Authorization": f"Bearer {token}"}
         
-        # Get topology
+        # Get topology to get node IDs
         resp = client.get(
             f"https://{CML_HOST}/api/v0/labs/{LAB_ID}/topology",
             headers=headers
@@ -104,12 +108,25 @@ def get_console_keys():
         topology = resp.json()
         nodes = topology.get('nodes', [])
         
+        # Fetch console key for each node via dedicated API
         console_keys = {}
         for node in nodes:
             label = node.get('label', 'unknown')
-            consoles = node.get('serial_consoles', [])
-            if consoles:
-                console_keys[label] = consoles[0].get('console_key')
+            node_id = node.get('id', 'unknown')
+            
+            # GET /api/v0/labs/{lab_id}/nodes/{node_id}/keys/console?line=0
+            try:
+                resp = client.get(
+                    f"https://{CML_HOST}/api/v0/labs/{LAB_ID}/nodes/{node_id}/keys/console",
+                    params={"line": 0},
+                    headers=headers
+                )
+                if resp.status_code == 200:
+                    console_keys[label] = resp.text.strip('"')
+                else:
+                    print(f"  Warning: Could not get console key for {label}: {resp.status_code}")
+            except Exception as e:
+                print(f"  Warning: Error getting console key for {label}: {e}")
         
         return console_keys
 

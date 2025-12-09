@@ -22,10 +22,10 @@ import os
 CML_HOST = os.environ.get("CML_HOST", "23.137.84.109")
 CML_USER = os.environ.get("CML_USER", "mediocretriumph")
 CML_PASS = os.environ.get("CML_PASS", "tavbyg-Moxvet-0pibxe")
+LAB_ID = os.environ.get("LAB_ID", "e65d8b6e-c8ac-4e79-82f6-736169c69c73")
 
 # Console key for the device you want to test
-# Get this from CML API: GET /api/v0/labs/{lab_id}/nodes/{node_id}
-# Look for serial_consoles[0].console_key
+# Get this from CML API: GET /api/v0/labs/{lab_id}/nodes/{node_id}/keys/console?line=0
 CONSOLE_KEY = os.environ.get("CONSOLE_KEY", "")  # You need to fill this in
 
 # Command to test
@@ -46,10 +46,9 @@ def debug_console_connection():
     if not CONSOLE_KEY:
         print("\nERROR: CONSOLE_KEY not set!")
         print("\nTo get the console key:")
-        print("1. Use the CML API: GET /api/v0/labs/{lab_id}/nodes/{node_id}")
-        print("2. Look for: serial_consoles[0].console_key")
-        print("3. Set CONSOLE_KEY environment variable or edit this script")
-        print("\nOr run: python debug_console.py --get-keys")
+        print("1. Run: python debug_console.py --get-keys")
+        print("2. Copy the console key for your device")
+        print("3. Run: CONSOLE_KEY=<key> python debug_console.py")
         return
     
     print("\n[STEP 1] Spawning SSH connection...")
@@ -168,7 +167,13 @@ def debug_console_connection():
 
 
 def get_console_key_from_api():
-    """Helper to get console key from CML API"""
+    """Helper to get console key from CML API
+    
+    Console keys require a SEPARATE API call per node:
+    GET /api/v0/labs/{lab_id}/nodes/{node_id}/keys/console?line=0
+    
+    The topology endpoint does NOT include console keys.
+    """
     import httpx
     import urllib3
     urllib3.disable_warnings()
@@ -177,9 +182,9 @@ def get_console_key_from_api():
     print("Getting console keys from CML API")
     print("=" * 60)
     
-    lab_id = input("Enter lab ID (or press Enter for e65d8b6e-c8ac-4e79-82f6-736169c69c73): ").strip()
+    lab_id = input(f"Enter lab ID (or press Enter for {LAB_ID}): ").strip()
     if not lab_id:
-        lab_id = "e65d8b6e-c8ac-4e79-82f6-736169c69c73"
+        lab_id = LAB_ID
     
     with httpx.Client(verify=False, timeout=30.0) as client:
         # Authenticate
@@ -196,7 +201,7 @@ def get_console_key_from_api():
         token = resp.text.strip('"')
         headers = {"Authorization": f"Bearer {token}"}
         
-        # Get topology
+        # Get topology to get node IDs
         print("Getting lab topology...")
         resp = client.get(
             f"https://{CML_HOST}/api/v0/labs/{lab_id}/topology",
@@ -210,20 +215,34 @@ def get_console_key_from_api():
         topology = resp.json()
         nodes = topology.get('nodes', [])
         
-        print(f"\nFound {len(nodes)} nodes:\n")
+        print(f"\nFound {len(nodes)} nodes, fetching console keys...\n")
         print(f"{'Label':<15} {'Node ID':<40} {'Console Key':<40}")
         print("-" * 95)
         
         for node in nodes:
             label = node.get('label', 'unknown')
             node_id = node.get('id', 'unknown')
-            consoles = node.get('serial_consoles', [])
-            console_key = consoles[0].get('console_key', 'N/A') if consoles else 'N/A'
+            
+            # Fetch console key via separate API call
+            console_key = "N/A"
+            try:
+                resp = client.get(
+                    f"https://{CML_HOST}/api/v0/labs/{lab_id}/nodes/{node_id}/keys/console",
+                    params={"line": 0},
+                    headers=headers
+                )
+                if resp.status_code == 200:
+                    # Response is just the key as a quoted string
+                    console_key = resp.text.strip('"')
+            except Exception as e:
+                console_key = f"ERROR: {e}"
             
             print(f"{label:<15} {node_id:<40} {console_key:<40}")
         
-        print("\nUse one of the console keys above with this script.")
-        print("Example: CONSOLE_KEY=<key> python debug_console.py")
+        print("\n" + "=" * 60)
+        print("To test a console connection:")
+        print(f"  CONSOLE_KEY=<key_from_above> python debug_console.py")
+        print("=" * 60)
 
 
 if __name__ == "__main__":
