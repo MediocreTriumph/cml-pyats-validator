@@ -73,23 +73,22 @@ async def execute_device_command(
         
         logger.info(f"Found device {device_name} with node ID {node_id}")
         
-        # Get detailed node information to retrieve console key
-        node_details = await client.get_node(lab_id, node_id)
-        
-        # Extract console key from serial_consoles
-        serial_consoles = node_details.get('serial_consoles', [])
-        if not serial_consoles:
+        # Get console key via dedicated API endpoint
+        # Console keys are NOT in the topology or node details - they require a separate call
+        # API: GET /api/v0/labs/{lab_id}/nodes/{node_id}/keys/console?line=0
+        try:
+            console_key = await client.get_console_key(lab_id, node_id, line=0)
+        except Exception as e:
+            logger.error(f"Failed to get console key for {device_name}: {e}")
             return {
                 "status": "error",
-                "error": f"No serial consoles found for device '{device_name}'"
+                "error": f"Failed to get console key for device '{device_name}': {e}"
             }
         
-        # Use the first console (device_number 0)
-        console_key = serial_consoles[0].get('console_key')
         if not console_key:
             return {
                 "status": "error",
-                "error": f"No console key found for device '{device_name}'"
+                "error": f"No console key returned for device '{device_name}'"
             }
         
         logger.info(f"Using console key {console_key} for {device_name}")
@@ -115,12 +114,12 @@ async def execute_device_command(
             device_pass = device_credentials.get("password")
             device_enable_pass = device_credentials.get("enable_password")
         
-        # Execute command via SSH console using console_key instead of node_uuid
+        # Execute command via SSH console using console_key
         raw_output = await execute_via_console(
             cml_host=cml_host,
             cml_user=client.username,
             cml_pass=client.password,
-            node_uuid=console_key,  # This is actually the console_key, not node UUID
+            node_uuid=console_key,  # This is the console_key, not node UUID
             command=command,
             device_user=device_user,
             device_pass=device_pass,
