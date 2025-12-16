@@ -96,6 +96,35 @@ class CMLClient:
             logger.error(f"Response text: {response.text[:500]}")
             raise
     
+    async def _request_text(self, method: str, endpoint: str, **kwargs) -> str:
+        """Make authenticated request and return raw text response"""
+        if not self.token:
+            await self.authenticate()
+        
+        headers = kwargs.pop('headers', {})
+        headers['Authorization'] = f'Bearer {self.token}'
+        
+        response = await self.client.request(
+            method,
+            f"{self.url}{endpoint}",
+            headers=headers,
+            **kwargs
+        )
+        
+        # Re-auth on 401
+        if response.status_code == 401:
+            await self.authenticate()
+            headers['Authorization'] = f'Bearer {self.token}'
+            response = await self.client.request(
+                method,
+                f"{self.url}{endpoint}",
+                headers=headers,
+                **kwargs
+            )
+        
+        response.raise_for_status()
+        return response.text.strip('"')
+    
     async def get_lab(self, lab_id: str) -> Dict[str, Any]:
         """Get lab details"""
         return await self._request('GET', f'/api/v0/labs/{lab_id}')
@@ -137,6 +166,29 @@ class CMLClient:
                 return node
         
         return None
+    
+    async def get_console_key(self, lab_id: str, node_id: str, line: int = 0) -> str:
+        """Get the console key for a node
+        
+        Console keys are required for SSH console connections and must be
+        fetched via a separate API call (not included in topology).
+        
+        Args:
+            lab_id: Lab ID
+            node_id: Node ID (UUID)
+            line: Console line number (default 0 for serial0)
+        
+        Returns:
+            Console key string (UUID format)
+        
+        API Endpoint:
+            GET /api/v0/labs/{lab_id}/nodes/{node_id}/keys/console?line={line}
+        """
+        return await self._request_text(
+            'GET',
+            f'/api/v0/labs/{lab_id}/nodes/{node_id}/keys/console',
+            params={'line': line}
+        )
     
     async def get_node_console_logs(self, lab_id: str, node_id: str, lines: int = 100) -> str:
         """Get console logs from a node"""
