@@ -2,6 +2,12 @@
 Console Execution via SSH
 
 Handles command execution on CML nodes via SSH to console server.
+
+FIXES APPLIED:
+1. Added 0.2s delay after sendline() to let command start executing
+2. Implemented retry logic for expect() to handle slow output
+3. Buffer accumulation across retry attempts
+4. Better timeout handling that doesn't lose partial output
 """
 
 import pexpect
@@ -214,12 +220,84 @@ async def execute_via_console(
             # Send the command
             child.sendline(command)
             
-            # Wait for prompt to return (command completion)
-            # Use a longer timeout for commands that take time
-            child.expect([cisco_prompt, simple_prompt], timeout=timeout)
+            # CRITICAL FIX: Allow time for command to execute and output to buffer
+            # Without this, fast consecutive commands create a race condition where
+            # expect() might match the prompt before output has been generated
+            time.sleep(0.2)
             
-            # Extract output (everything between command echo and next prompt)
-            output = child.before
+            # Wait for prompt to return (command completion)
+            # Handle pagination dynamically by watching for --More-- prompts
+            # This works across all platforms and modes (IOS, ASA, NX-OS, config mode, etc.)
+            output_buffer = []
+            max_iterations = 50  # Prevent infinite loop on very long output
+            
+            for iteration in range(max_iterations):
+                try:
+                    i = child.expect([
+                        cisco_prompt, 
+                        simple_prompt, 
+                        r"--More--",              # IOS/IOS-XE pagination
+                        r"<--- More --->",        # NX-OS pagination  
+                        r"\(yes/no\)",            # Confirmation prompts
+                        r"[Cc]onfirm",            # Alternative confirmation
+                    ], timeout=timeout)
+                    
+                    # Capture output before the match
+                    if child.before:
+                        output_buffer.append(child.before)
+                    
+                    if i in [0, 1]:  # Got prompt - command completed
+                        logger.info(f"Command completed successfully after {iteration + 1} iteration(s)")
+                        break
+                    
+                    elif i in [2, 3]:  # Hit pagination prompt (--More-- or <--- More --->)
+                        logger.debug(f"Pagination prompt detected (iteration {iteration + 1}), continuing...")
+                        child.send(" ")  # Send space to continue pagination
+                        time.sleep(0.05)  # Small delay for next page to start loading
+                        continue
+                    
+                    elif i in [4, 5]:  # Confirmation prompt
+                        logger.info("Confirmation prompt detected, sending 'yes'")
+                        child.sendline("yes")
+                        time.sleep(0.1)
+                        continue
+                    
+                except pexpect.TIMEOUT:
+                    # Timeout could mean:
+                    # 1. Command is still executing (rare)
+                    # 2. We missed a prompt pattern
+                    # 3. Device is hung
+                    
+                    if child.before:
+                        output_buffer.append(child.before)
+                        logger.warning(f"Timeout on iteration {iteration + 1}, captured {len(child.before)} chars")
+                    
+                    # Check if we at least have some output - if so, this might be OK
+                    if output_buffer:
+                        logger.warning("Timeout but we have output, attempting to recover")
+                        # Try sending newline to see if we can get a prompt
+                        child.send("\r")
+                        time.sleep(0.3)
+                        try:
+                            child.expect([cisco_prompt, simple_prompt], timeout=2)
+                            logger.info("Recovered from timeout")
+                            if child.before:
+                                output_buffer.append(child.before)
+                            break
+                        except pexpect.TIMEOUT:
+                            pass
+                    
+                    # Final timeout - raise it
+                    logger.error(f"Command timed out after {iteration + 1} iteration(s)")
+                    raise
+            
+            else:
+                # Hit max_iterations without getting a final prompt
+                logger.warning(f"Hit max iterations ({max_iterations}) without final prompt, using collected output")
+                # Don't raise - we may have collected valid output
+            
+            # Combine all output chunks captured across retries
+            output = ''.join(output_buffer)
             
             logger.info(f"Command output length: {len(output) if output else 0} chars")
             
@@ -438,10 +516,13 @@ async def execute_config_commands(
             child.expect(config_prompt, timeout=5)
             all_output.append("Entered configuration mode")
             
-            # Execute each config command
+            # Execute each config command with same timing fix
             for cmd in commands:
                 logger.info(f"Executing config command: {cmd}")
                 child.sendline(cmd)
+                
+                # Apply same timing fix for config commands
+                time.sleep(0.2)
                 
                 # Wait for next prompt (could be config or sub-config mode)
                 child.expect([config_prompt, any_prompt], timeout=10)
