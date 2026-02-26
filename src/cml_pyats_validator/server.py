@@ -5,7 +5,7 @@ FastMCP server that provides network device validation tools for CML labs.
 Uses SSH console access for command execution and PyATS parsers for output analysis.
 """
 
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from typing import Optional, Dict, Any, List
 import logging
 
@@ -255,8 +255,35 @@ async def run_testbed_validation(
 
 def main():
     """Main entry point for the MCP server"""
-    logger.info("Starting CML PyATS Validator MCP server")
-    mcp.run()
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(description="CML PyATS Validator MCP Server")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "streamable-http"],
+        default=os.environ.get("TRANSPORT", "stdio"),
+        help="MCP transport mode (default: stdio, env: TRANSPORT)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("HOST", "0.0.0.0"),
+        help="HTTP bind address (default: 0.0.0.0, env: HOST)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("PORT", "9001")),
+        help="HTTP port (default: 9001, env: PORT)",
+    )
+    args = parser.parse_args()
+
+    if args.transport == "streamable-http":
+        logger.info(f"Starting CML PyATS Validator in HTTP mode on {args.host}:{args.port}")
+        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+    else:
+        logger.info("Starting CML PyATS Validator in stdio mode")
+        mcp.run()
 
 
 if __name__ == "__main__":

@@ -11,6 +11,27 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def is_asa_device(device_type: str) -> bool:
+    """Check if device is ASA platform"""
+    return 'asav' in device_type.lower() or 'asa' in device_type.lower()
+
+
+def get_interface_command(device_type: str, interface: Optional[str] = None) -> str:
+    """Get interface command based on device type
+
+    IOS: show interfaces / show ip interface brief
+    ASA: show interface / show interface ip brief
+    """
+    is_asa = is_asa_device(device_type)
+
+    if interface:
+        # Specific interface query
+        return f"show interface {interface}"
+    else:
+        # All interfaces - IOS uses plural, ASA uses singular
+        return "show interface" if is_asa else "show interfaces"
+
+
 async def validate_device_interfaces(
     lab_id: str,
     device_name: str,
@@ -44,11 +65,23 @@ async def validate_device_interfaces(
         )
     """
     try:
-        # Execute show interfaces command
-        command = "show interfaces"
-        if interface:
-            command = f"show interfaces {interface}"
-        
+        # First, execute a simple command to get device type
+        probe_result = await execute_device_command(
+            lab_id=lab_id,
+            device_name=device_name,
+            command="show version",
+            device_credentials=device_credentials,
+            use_parser=False
+        )
+
+        if "error" in probe_result:
+            return probe_result
+
+        device_type = probe_result.get("device_type", "unknown")
+
+        # Get the appropriate command based on device type
+        command = get_interface_command(device_type, interface)
+
         result = await execute_device_command(
             lab_id=lab_id,
             device_name=device_name,
