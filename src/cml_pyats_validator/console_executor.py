@@ -113,12 +113,11 @@ async def execute_via_console(
             except pexpect.TIMEOUT:
                 pass
             
-            # Send carriage return to trigger prompt (not just newline)
-            # IOSv devices expect \r or \r\n
+            # Send a single carriage return to trigger prompt
+            # IMPORTANT: Only send ONE CR to avoid stale prompts in the buffer
             logger.info("Sending CR to trigger device prompt")
             child.send("\r")
-            time.sleep(0.3)
-            child.send("\r")
+            time.sleep(0.5)
             
             # Cisco IOS prompt patterns:
             # - hostname>           (user EXEC mode)
@@ -127,64 +126,92 @@ async def execute_via_console(
             # - hostname(config-if)# (interface config mode)
             # Hostname can contain letters, numbers, hyphens, underscores
             cisco_prompt = r"[\w\-\.]+(\([^\)]+\))?[>#]\s*$"
-            
+
             # Also match simple prompts in case hostname isn't set
             simple_prompt = r"[>#]\s*$"
-            
+
+            # Linux/Desktop prompt patterns:
+            # - hostname:~$         (CML Desktop default)
+            # - user@hostname:~$    (standard bash)
+            # - hostname:path$      (with directory)
+            # - root@hostname:~#    (root user)
+            linux_prompt = r"[\w\-\.]+:[\w~/]+[\$#]\s*"
+
             # Combined pattern - try cisco first, fall back to simple
             combined_prompt = f"({cisco_prompt}|{simple_prompt})"
-            
+
+            # Determine which prompt patterns to use based on device_prompt hint
+            is_linux = '$' in device_prompt
+
+            if is_linux:
+                # For Linux/Desktop devices, use Linux prompt patterns primarily
+                prompt_patterns = [linux_prompt, simple_prompt]
+            else:
+                prompt_patterns = [cisco_prompt, simple_prompt]
+
             # Try to detect what state we're in
-            logger.info("Waiting for device prompt...")
+            logger.info(f"Waiting for device prompt... (linux={is_linux}, pattern={device_prompt})")
             i = child.expect([
                 r"[Uu]sername:",
                 r"[Ll]ogin:",
                 r"[Pp]assword:",
-                cisco_prompt,
-                simple_prompt,
+            ] + prompt_patterns + [
                 pexpect.TIMEOUT
             ], timeout=15)
-            
-            if i == 5:  # Timeout
+
+            timeout_index = 3 + len(prompt_patterns)
+
+            if i == timeout_index:  # Timeout
                 # Log what we have in the buffer for debugging
                 logger.warning(f"Timeout waiting for prompt. Buffer contents: {repr(child.before)}")
-                
-                # Try a few more times with different approaches
-                for attempt in range(3):
-                    logger.info(f"Retry attempt {attempt + 1}: sending CR")
-                    child.send("\r")
-                    time.sleep(0.5)
-                    
-                    try:
-                        j = child.expect([cisco_prompt, simple_prompt, pexpect.TIMEOUT], timeout=5)
-                        if j < 2:
-                            logger.info(f"Got prompt on retry {attempt + 1}")
-                            break
-                    except pexpect.TIMEOUT:
-                        continue
+
+                # Strip ANSI escapes from buffer and check for prompt
+                buffer = child.before if child.before else ""
+                clean_buffer = _strip_ansi(buffer)
+
+                # Check if there's a prompt in the cleaned buffer
+                if is_linux and re.search(r'[\$#]\s*$', clean_buffer):
+                    logger.info("Found Linux prompt in ANSI-cleaned buffer, proceeding")
+                elif re.search(r'[>#]\s*$', clean_buffer):
+                    logger.info("Found prompt-like pattern in ANSI-cleaned buffer, proceeding")
                 else:
-                    # Last resort: check if there's anything that looks like a prompt
-                    buffer = child.before if child.before else ""
-                    if re.search(r'[>#]\s*$', buffer):
-                        logger.info("Found prompt-like pattern in buffer, proceeding")
+                    # Try a few more times with different approaches
+                    for attempt in range(3):
+                        logger.info(f"Retry attempt {attempt + 1}: sending CR")
+                        child.send("\r")
+                        time.sleep(0.5)
+
+                        try:
+                            j = child.expect(prompt_patterns + [pexpect.TIMEOUT], timeout=5)
+                            if j < len(prompt_patterns):
+                                logger.info(f"Got prompt on retry {attempt + 1}")
+                                break
+                        except pexpect.TIMEOUT:
+                            continue
                     else:
-                        raise TimeoutError(
-                            f"Could not detect device prompt after multiple attempts. "
-                            f"Buffer: {repr(buffer)}"
-                        )
+                        # Final check with ANSI stripping
+                        buffer = child.before if child.before else ""
+                        clean_buffer = _strip_ansi(buffer)
+                        if re.search(r'[>#$]\s*$', clean_buffer):
+                            logger.info("Found prompt in cleaned buffer after retries, proceeding")
+                        else:
+                            raise TimeoutError(
+                                f"Could not detect device prompt after multiple attempts. "
+                                f"Buffer: {repr(buffer)}"
+                            )
                         
             elif i in [0, 1]:  # Username/Login prompt
                 if not device_user:
                     raise ValueError(
                         "Device requires authentication but no credentials provided"
                     )
-                
+
                 logger.info("Device requires authentication, logging in")
                 child.sendline(device_user)
                 child.expect(r"[Pp]assword:", timeout=5)
                 child.sendline(device_pass)
-                child.expect(cisco_prompt, timeout=10)
-                
+                child.expect(prompt_patterns, timeout=10)
+
             elif i == 2:  # Password prompt directly (no username)
                 if not device_pass:
                     raise ValueError(
@@ -192,17 +219,18 @@ async def execute_via_console(
                     )
                 logger.info("Device requires password, authenticating")
                 child.sendline(device_pass)
-                child.expect(cisco_prompt, timeout=10)
-            
+                child.expect(prompt_patterns, timeout=10)
+
             # We're now at a prompt
-            current_prompt = child.after.strip() if child.after else "unknown"
+            current_prompt = _strip_ansi(child.after.strip()) if child.after else "unknown"
             logger.info(f"Device prompt detected: '{current_prompt}'")
-            
+
             # Determine if we're in user mode (>) or privileged mode (#)
             in_enable_mode = current_prompt.endswith('#') if current_prompt else False
-            
+
             # If enable password provided and we're not in enable mode, enter it
-            if device_enable_pass and not in_enable_mode:
+            # (Only for Cisco devices, not Linux)
+            if device_enable_pass and not in_enable_mode and not is_linux:
                 logger.info("Entering enable mode")
                 child.sendline("enable")
                 i = child.expect([r"[Pp]assword:", cisco_prompt], timeout=5)
@@ -210,68 +238,102 @@ async def execute_via_console(
                     child.sendline(device_enable_pass)
                     child.expect(r"#", timeout=5)
                     logger.info("Now in enable mode")
-            
-            # Clear buffer before sending command
+
+            # Check if device is stuck in config mode and exit to exec mode
+            # Config mode prompts contain '(' e.g. GW-RTR(config)#, GW-RTR(config-if)#
+            if not is_linux and current_prompt and '(' in current_prompt and current_prompt.endswith('#'):
+                logger.info(f"Device is in config mode (prompt: '{current_prompt}'), sending 'end' to exit")
+                child.sendline("end")
+                child.expect(prompt_patterns, timeout=5)
+                current_prompt = _strip_ansi(child.after.strip()) if child.after else current_prompt
+                logger.info(f"Exited config mode, now at: '{current_prompt}'")
+
+            # Disable pagination for Cisco devices
+            if not is_linux and in_enable_mode:
+                child.sendline("terminal length 0")
+                time.sleep(0.3)
+                try:
+                    child.expect(prompt_patterns, timeout=5)
+                except pexpect.TIMEOUT:
+                    logger.warning("Timeout after 'terminal length 0', continuing")
+
+            # Clear buffer before sending command — drain ALL stale data
+            # This is critical for Linux nodes where ANSI escapes and stale
+            # prompts can accumulate and cause the command's prompt match
+            # to hit a stale prompt instead of the real one
             child.send("\r")
-            child.expect([cisco_prompt, simple_prompt], timeout=5)
-            
+            time.sleep(0.5)
+            # Drain everything from the buffer (prompts, ANSI escapes, etc.)
+            for _drain in range(5):
+                try:
+                    child.read_nonblocking(size=4096, timeout=0.3)
+                except (pexpect.TIMEOUT, pexpect.EOF):
+                    break
+
             logger.info(f"Executing command: {command}")
-            
+
             # Send the command
             child.sendline(command)
-            
-            # CRITICAL FIX: Allow time for command to execute and output to buffer
-            # Without this, fast consecutive commands create a race condition where
-            # expect() might match the prompt before output has been generated
-            time.sleep(0.2)
-            
+
+            # Allow time for command to execute and output to buffer
+            time.sleep(0.3)
+
             # Wait for prompt to return (command completion)
             # Handle pagination dynamically by watching for --More-- prompts
             # This works across all platforms and modes (IOS, ASA, NX-OS, config mode, etc.)
             output_buffer = []
             max_iterations = 50  # Prevent infinite loop on very long output
-            
+
             for iteration in range(max_iterations):
                 try:
-                    i = child.expect([
-                        cisco_prompt, 
-                        simple_prompt, 
+                    i = child.expect(
+                        prompt_patterns + [
                         r"--More--",              # IOS/IOS-XE pagination
-                        r"<--- More --->",        # NX-OS pagination  
+                        r"<--- More --->",        # NX-OS pagination
                         r"\(yes/no\)",            # Confirmation prompts
                         r"[Cc]onfirm",            # Alternative confirmation
                     ], timeout=timeout)
-                    
+
+                    num_prompts = len(prompt_patterns)
+
                     # Capture output before the match
                     if child.before:
                         output_buffer.append(child.before)
-                    
-                    if i in [0, 1]:  # Got prompt - command completed
+
+                    if i < num_prompts:  # Got prompt - command completed
                         logger.info(f"Command completed successfully after {iteration + 1} iteration(s)")
                         break
-                    
-                    elif i in [2, 3]:  # Hit pagination prompt (--More-- or <--- More --->)
+
+                    elif i in [num_prompts, num_prompts + 1]:  # Pagination
                         logger.debug(f"Pagination prompt detected (iteration {iteration + 1}), continuing...")
                         child.send(" ")  # Send space to continue pagination
                         time.sleep(0.05)  # Small delay for next page to start loading
                         continue
-                    
-                    elif i in [4, 5]:  # Confirmation prompt
+
+                    elif i in [num_prompts + 2, num_prompts + 3]:  # Confirmation
                         logger.info("Confirmation prompt detected, sending 'yes'")
                         child.sendline("yes")
                         time.sleep(0.1)
                         continue
-                    
+
                 except pexpect.TIMEOUT:
                     # Timeout could mean:
                     # 1. Command is still executing (rare)
                     # 2. We missed a prompt pattern
                     # 3. Device is hung
-                    
+
                     if child.before:
                         output_buffer.append(child.before)
                         logger.warning(f"Timeout on iteration {iteration + 1}, captured {len(child.before)} chars")
-                    
+
+                    # For Linux nodes, check if the prompt is hidden in ANSI escapes
+                    if is_linux and output_buffer:
+                        combined = ''.join(output_buffer)
+                        clean = _strip_ansi(combined)
+                        if re.search(r'[\$#]\s*$', clean):
+                            logger.info("Found Linux prompt in ANSI-cleaned output, command likely completed")
+                            break
+
                     # Check if we at least have some output - if so, this might be OK
                     if output_buffer:
                         logger.warning("Timeout but we have output, attempting to recover")
@@ -279,14 +341,19 @@ async def execute_via_console(
                         child.send("\r")
                         time.sleep(0.3)
                         try:
-                            child.expect([cisco_prompt, simple_prompt], timeout=2)
+                            child.expect(prompt_patterns, timeout=2)
                             logger.info("Recovered from timeout")
                             if child.before:
                                 output_buffer.append(child.before)
                             break
                         except pexpect.TIMEOUT:
-                            pass
-                    
+                            # For Linux: if we have output, accept it
+                            if is_linux and output_buffer:
+                                logger.info("Linux device: accepting output despite prompt timeout")
+                                if child.before:
+                                    output_buffer.append(child.before)
+                                break
+
                     # Final timeout - raise it
                     logger.error(f"Command timed out after {iteration + 1} iteration(s)")
                     raise
@@ -298,8 +365,9 @@ async def execute_via_console(
             
             # Combine all output chunks captured across retries
             output = ''.join(output_buffer)
-            
+
             logger.info(f"Command output length: {len(output) if output else 0} chars")
+            logger.info(f"Raw output repr: {repr(output[:200])}")
             
             # Clean exit from console
             logger.info("Disconnecting from device console")
@@ -580,6 +648,16 @@ async def execute_config_commands(
     loop = asyncio.get_event_loop()
     output = await loop.run_in_executor(None, _ssh_config_execute)
     return output
+
+
+def _strip_ansi(text: str) -> str:
+    """Strip ANSI escape sequences from text.
+
+    Handles common sequences including CSI (Control Sequence Introducer),
+    cursor position queries (\x1b[6n), and other escape codes.
+    """
+    ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    return ansi_escape.sub('', text)
 
 
 def _clean_output(output: str, command: str) -> str:
